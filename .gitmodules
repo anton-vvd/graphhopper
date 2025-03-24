@@ -1,0 +1,3 @@
+[submodule "vrp-web-api"]
+	path = vrp-web-api
+	url = git@vvd.github.com:anton-vvd/vrp-web-api.git
