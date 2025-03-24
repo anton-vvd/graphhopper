@@ -58,16 +58,17 @@
     </issueManagement>
 
     <modules>
+        <module>web-api</module>
         <module>core</module>
         <module>reader-gtfs</module>
         <module>tools</module>
         <module>map-matching</module>
-        <module>web-bundle</module>
-        <module>web-api</module>
-        <module>web</module>
         <module>client-hc</module>
+        <module>web-bundle</module>
         <module>navigation</module>
+        <module>web</module>
         <module>example</module>
+        <module>osm-downloader</module>
     </modules>
     <dependencyManagement>
         <dependencies>
