@@ -6,6 +6,7 @@ import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpResponse;
 import org.apache.hc.client5.http.impl.classic.HttpClients;
+import org.apache.hc.core5.http.ClassicHttpRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -36,7 +37,7 @@ public class OSMDownloader {
     }
 
     public void downloadRegion(String region) throws IOException {
-        logger.info("Starting download for region: {}", region);
+        logger.debug("Starting download for region: {}", region);
         
         // Create download directory if it doesn't exist
         Path downloadPath = Paths.get(downloadDir);
@@ -48,6 +49,8 @@ public class OSMDownloader {
             throw new IllegalArgumentException("Region not found: " + region);
         }
 
+        System.out.println("Downloading region: " + region);
+        
         // Generate filename with timestamp
         String timestamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss"));
         String filename = String.format("%s_%s.osm.pbf", region, timestamp);
@@ -55,7 +58,8 @@ public class OSMDownloader {
 
         // Download the file
         downloadFile(downloadUrl, filePath);
-        logger.info("Successfully downloaded {} to {}", region, filePath);
+        System.out.println("\nDownload completed: " + filePath);
+        logger.debug("Successfully downloaded {} to {}", region, filePath);
 
         // Clean up old files if not keeping them
         if (!keepOldFiles) {
@@ -63,35 +67,141 @@ public class OSMDownloader {
         }
     }
 
-    private String getDownloadUrl(String region) throws IOException {
+    private String getDownloadUrl(String targetRegion) throws IOException {
         try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
             HttpGet request = new HttpGet(GEOFABRIK_INDEX_URL);
             try (CloseableHttpResponse response = httpClient.execute(request)) {
                 JsonNode root = objectMapper.readTree(response.getEntity().getContent());
-                JsonNode files = root.get("files");
                 
-                // Look for the region in the files
-                for (JsonNode file : files) {
-                    if (file.get("name").asText().equals(region + ".osm.pbf")) {
-                        return GEOFABRIK_BASE_URL + file.get("url").asText();
+                // First check if the region is in the root level files
+                JsonNode files = root.get("files");
+                if (files != null) {
+                    for (JsonNode file : files) {
+                        if (file.get("id") != null && file.get("id").asText().equals(targetRegion)) {
+                            return file.get("urls").get("pbf").asText();
+                        }
                     }
                 }
+                
+                // If not found in root, check all parent regions
+                JsonNode regions = root.get("regions");
+                if (regions != null) {
+                    for (JsonNode region : regions) {
+                        String parentRegionId = region.get("id").asText();
+                        
+                        // Check files in this region
+                        files = region.get("files");
+                        if (files != null) {
+                            for (JsonNode file : files) {
+                                if (file.get("id") != null && file.get("id").asText().equals(targetRegion)) {
+                                    // If the file has a direct URL in the index, use it
+                                    if (file.get("urls") != null && file.get("urls").get("pbf") != null) {
+                                        return file.get("urls").get("pbf").asText();
+                                    }
+                                    // Otherwise construct the URL using the pattern
+                                    return GEOFABRIK_BASE_URL + parentRegionId + "/" + targetRegion + "-latest.osm.pbf";
+                                }
+                            }
+                        }
+                        
+                        // Check subregions
+                        JsonNode subregions = region.get("subregions");
+                        if (subregions != null) {
+                            for (JsonNode subregion : subregions) {
+                                files = subregion.get("files");
+                                if (files != null) {
+                                    for (JsonNode file : files) {
+                                        if (file.get("id") != null && file.get("id").asText().equals(targetRegion)) {
+                                            // If the file has a direct URL in the index, use it
+                                            if (file.get("urls") != null && file.get("urls").get("pbf") != null) {
+                                                return file.get("urls").get("pbf").asText();
+                                            }
+                                            // Otherwise construct the URL using the pattern
+                                            String parentId = subregion.get("parent").asText();
+                                            return GEOFABRIK_BASE_URL + parentId + "/" + targetRegion + "-latest.osm.pbf";
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // If the region is not found in the index, try the default URL pattern
+                if ("israel-and-palestine".equals(targetRegion)) {
+                    return GEOFABRIK_BASE_URL + "asia/" + targetRegion + "-latest.osm.pbf";
+                }
+                
+                throw new IllegalArgumentException("Region not found: " + targetRegion);
             }
         }
-        return null;
+    }
+
+    private static class ProgressTracker {
+        private final long totalBytes;
+        private long downloadedBytes;
+        private long lastUpdateTime;
+        private static final int UPDATE_INTERVAL_MS = 100; // Update progress every 100ms
+
+        public ProgressTracker(long totalBytes) {
+            this.totalBytes = totalBytes;
+            this.downloadedBytes = 0;
+            this.lastUpdateTime = System.currentTimeMillis();
+        }
+
+        public void update(int bytesRead) {
+            downloadedBytes += bytesRead;
+            long currentTime = System.currentTimeMillis();
+            if (currentTime - lastUpdateTime > UPDATE_INTERVAL_MS) {
+                printProgress();
+                lastUpdateTime = currentTime;
+            }
+        }
+
+        private void printProgress() {
+            if (totalBytes <= 0) return;
+            
+            int progressBarWidth = 50;
+            double progress = (double) downloadedBytes / totalBytes;
+            int progressChars = (int) (progressBarWidth * progress);
+            
+            StringBuilder bar = new StringBuilder("[");
+            for (int i = 0; i < progressBarWidth; i++) {
+                bar.append(i < progressChars ? "=" : " ");
+            }
+            bar.append("]");
+            
+            String bytesStr = String.format("%.1f/%.1f MB", 
+                downloadedBytes / (1024.0 * 1024.0),
+                totalBytes / (1024.0 * 1024.0));
+            
+            String progressStr = String.format("%3d%%", (int) (progress * 100));
+            
+            // Clear line and print progress
+            System.out.print("\r" + progressStr + " " + bar + " " + bytesStr);
+            
+            if (downloadedBytes >= totalBytes) {
+                System.out.println(); // New line when done
+            }
+        }
     }
 
     private void downloadFile(String url, Path filePath) throws IOException {
         try (CloseableHttpClient httpClient = HttpClients.createDefault()) {
             HttpGet request = new HttpGet(url);
-            try (CloseableHttpResponse response = httpClient.execute(request);
-                 InputStream inputStream = response.getEntity().getContent();
-                 FileOutputStream outputStream = new FileOutputStream(filePath.toFile())) {
+            try (CloseableHttpResponse response = httpClient.execute(request)) {
+                long contentLength = response.getEntity().getContentLength();
+                ProgressTracker progress = new ProgressTracker(contentLength);
                 
-                byte[] buffer = new byte[8192];
-                int bytesRead;
-                while ((bytesRead = inputStream.read(buffer)) != -1) {
-                    outputStream.write(buffer, 0, bytesRead);
+                try (InputStream inputStream = response.getEntity().getContent();
+                     FileOutputStream outputStream = new FileOutputStream(filePath.toFile())) {
+                    
+                    byte[] buffer = new byte[8192];
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        outputStream.write(buffer, 0, bytesRead);
+                        progress.update(bytesRead);
+                    }
                 }
             }
         }
@@ -119,7 +229,7 @@ public class OSMDownloader {
             for (File file : files) {
                 if (file != mostRecent) {
                     if (file.delete()) {
-                        logger.info("Deleted old file: {}", file.getName());
+                        logger.debug("Deleted old file: {}", file.getName());
                     } else {
                         logger.warn("Failed to delete old file: {}", file.getName());
                     }
